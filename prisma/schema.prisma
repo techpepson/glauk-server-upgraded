@@ -1,0 +1,93 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id                       String    @id @default(cuid())
+  name                     String
+  verificationCode         String?
+  userName                 String?
+  isEmailVerified          Boolean?  @default(false)
+  email                    String    @unique
+  password                 String
+  level                    Int?      @default(1)
+  phone                    String
+  xp                       Int?      @default(0)
+  totalXp                  Int?      @default(100)
+  targetGpa                Float?    @default(4.0)
+  major                    String?
+  averageScore             Float     @default(0)
+  profileImage             String?
+  isFirstTimeUser          Boolean   @default(true)
+  isUserRemembered         Boolean   @default(false)
+  preferEmailNotification  Boolean   @default(true)
+  preferPushNotification   Boolean   @default(true)
+  preferQuizReminders      Boolean   @default(true)
+  preferLeaderboardUpdates Boolean   @default(true)
+  currentGpa               Float     @default(0)
+  totalCredits             Int       @default(30)
+  role                     String    @default("student")
+  courses                  Courses[]
+  verifiedAt               DateTime?
+  verificationCodeSentAt   DateTime? @default(now())
+  createdAt                DateTime  @default(now())
+  updatedAt                DateTime  @updatedAt
+}
+
+model Courses {
+  id                    String         @id @default(cuid())
+  courseName            String
+  courseDescription     String?
+  courseCode            String
+  courseCredits         Int
+  courseGrades          String[]       @default([])
+  courseGradePoints     Float[]        @default([])
+  courseInstructorEmail String?
+  courseScores          Float[]        @default([])
+  courseSlides          CourseSlides[]
+  user                  User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId                String
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+
+  @@unique([courseCode, userId])
+}
+
+model CourseSlides {
+  id               String     @id @default(cuid())
+  course           Courses?   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  courseId         String?
+  slideUrl         String
+  courseArea       String
+  completionStatus String     @default("pending")
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+  questions        Question[]
+}
+
+model Question {
+  id                         String       @id @default(cuid())
+  content                    Json?
+  correctAnswers             Int
+  remarks                    String?
+  difficultyLevel            String       @default("medium")
+  questionType               String       @default("multiple_choice")
+  numberOfQuestionsGenerated Int
+  obtainedGrade              String       @default("X")
+  obtainedGPT                Float        @default(0.0)
+  course                     CourseSlides @relation(fields: [courseSlidesId], references: [id])
+  createdAt                  DateTime     @default(now())
+  updatedAt                  DateTime     @updatedAt
+  courseSlidesId             String
+}

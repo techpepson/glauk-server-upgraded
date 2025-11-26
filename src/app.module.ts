@@ -1,5 +1,5 @@
 import { AuthModule } from './auth/auth.module';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import { QuizModule } from './quiz/quiz.module';
 import { HelpersModule } from './helpers/helpers.module';
 import { CoursesModule } from './courses/courses.module';
@@ -19,9 +19,31 @@ import { memoryStorage } from 'multer';
 import { MailerModule } from '@nestjs-modules/mailer';
 import { HandlebarsAdapter } from '@nestjs-modules/mailer/dist/adapters/handlebars.adapter';
 import { join } from 'path';
+import { BullModule } from '@nestjs/bullmq';
 
 @Module({
   imports: [
+    BullModule.forRootAsync({
+      imports: [ConfigModule],
+      useFactory: async (config: ConfigService) => ({
+        connection: {
+          host: config.get<string>('redis.host'),
+          port: config.get<number>('redis.port'),
+          password: config.get<string>('redis.password'),
+        },
+      }),
+      inject: [ConfigService],
+    }),
+
+    BullModule.registerQueue(
+      {
+        name: 'quiz-processing',
+      },
+      {
+        name: 'generate-quiz',
+      },
+    ),
+
     MailerModule.forRoot({
       transport: {
         host: process.env.MAILER_HOST,

@@ -1,3 +1,4 @@
+import { BullModule } from '@nestjs/bullmq';
 import { HelpersService } from '../helpers/helpers.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { QuizController } from './quiz.controller';
@@ -9,7 +10,16 @@ https://docs.nestjs.com/modules
 import { Module } from '@nestjs/common';
 
 @Module({
-  imports: [],
+  imports: [
+    BullModule.registerQueue(
+      {
+        name: 'quiz-processing',
+      },
+      {
+        name: 'generate-quiz',
+      },
+    ),
+  ],
   controllers: [QuizController],
   providers: [QuizService, PrismaService, HelpersService],
 })

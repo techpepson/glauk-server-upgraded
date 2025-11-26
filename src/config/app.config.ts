@@ -38,4 +38,9 @@ export default () => ({
     model:
       process.env.OPEN_ROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct:free',
   },
+  redis: {
+    host: process.env.REDIS_HOST || 'localhost',
+    port: parseInt(process.env.REDIS_PORT?.toString() || '6379'),
+    password: process.env.REDIS_PASSWORD || '',
+  },
 });

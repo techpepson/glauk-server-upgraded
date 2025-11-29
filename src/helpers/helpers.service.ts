@@ -3,12 +3,14 @@ import {
   Injectable,
   InternalServerErrorException,
   Logger,
+  NotAcceptableException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import ShortUniqueId from 'short-unique-id';
 import { supabase } from '../supabase/supabase-client';
 import { PDFParse } from 'pdf-parse';
 import PptxParser from 'node-pptx-parser';
+import { parseOfficeAsync } from 'officeparser';
 
 import { ConfigService } from '@nestjs/config';
 
@@ -52,9 +54,7 @@ export class HelpersService {
       },
     });
 
-    const userCredit = user?.totalCredits;
-
-    if (userCredit! < requiredCredit) {
+    if (!user || (user.totalCredits ?? 0) < requiredCredit) {
       return false;
     } else {
       return true;
@@ -85,10 +85,25 @@ export class HelpersService {
     try {
       const fileBuffer = file.buffer;
 
-      if (!fileBuffer.buffer) {
-        throw new BadRequestException('File buffer is empty');
+      if (!file.buffer || file.buffer.length === 0) {
+        throw new BadRequestException('File is empty');
       }
 
+      const allowedTypes = [
+        'application/pdf',
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        'application/vnd.ms-powerpoint',
+        'application/vnd.ms-powerpoint.presentation.macroEnabled.12',
+        'application/pptx',
+      ];
+      if (!allowedTypes.includes(file.mimetype)) {
+        throw new NotAcceptableException('File type not allowed');
+      }
+
+      if (file.size > 32 * 1024 * 1024) {
+        // 32MB limit
+        throw new BadRequestException('File too large');
+      }
       const user = await this.prisma.user.findUnique({
         where: {
           email,
@@ -126,7 +141,9 @@ export class HelpersService {
           .upload(pptxFilePath, fileBuffer);
 
         if (error) {
-          throw new BadRequestException('There was an error uploading pdf.');
+          throw new BadRequestException(
+            'There was an error uploading pptx file.',
+          );
         }
 
         const { data: publicdData } = supabase.storage
@@ -150,56 +167,337 @@ export class HelpersService {
   }
 
   async extractFileContent(file: Express.Multer.File, email: string) {
+    let rawText = '';
+    let publicUrl = '';
+
     try {
-      const originalname = file.originalname;
+      const originalname = file.originalname.toLowerCase();
+      const ext = originalname.split('.').pop()?.toLowerCase();
 
-      const ext = originalname.split('.').pop();
+      // === File size check ===
+      if (file.size > 35 * 1024 * 1024) {
+        throw new BadRequestException('File too large (max 35MB)');
+      }
 
-      if (ext == 'pdf') {
-        const parseFileToSupabase = await this.parseFileToSupabase(file, email);
+      // === MIME type validation ===
+      const allowedMimes = [
+        'application/pdf',
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        'application/vnd.ms-powerpoint',
+        'application/vnd.ms-powerpoint.presentation.macroEnabled.12',
+        'application/pptx',
+      ];
 
-        const pdfUrl = parseFileToSupabase.publicUrl;
+      if (!allowedMimes.includes(file.mimetype)) {
+        throw new NotAcceptableException(
+          'File type not allowed. Only PDF and PPTX are supported.',
+        );
+      }
 
-        const parser = new PDFParse({ url: pdfUrl });
-
+      // === PDF: Keep your exact working logic ===
+      if (ext === 'pdf') {
+        const parser = new PDFParse({ data: file.buffer });
         const pdfText = await parser.getText();
-        const pdfInfo = await parser.getInfo();
-        const pdfTable = await parser.getTable();
+
+        const upload = await this.parseFileToSupabase(file, email);
+        publicUrl = upload.publicUrl;
 
         await parser.destroy();
 
-        return {
-          rawText: pdfText,
-          info: pdfInfo ?? null,
-          table: pdfTable ?? null,
-          url: pdfUrl,
-        };
-      } else {
-        const fileParser = await this.parseFileToSupabase(file, email);
+        rawText = pdfText.text.trim();
+      }
 
-        const slideContent = '';
-        const parser = new PptxParser(fileParser.publicUrl);
-
-        const pptx = await parser.parse();
-
-        pptx.slides.forEach((slide) => {
-          slide.parsed.forEach((shape: any) => {
-            if (shape.text) {
-              slideContent.concat(shape.text + '\n');
-            }
-          });
+      // === PPTX: Clean, modern parsing with officeparser ===
+      else if (ext === 'pptx' || ext === 'ppt') {
+        const pptText = await parseOfficeAsync(file.buffer, {
+          newlineDelimiter: '\n\n',
+          ignoreNotes: false,
         });
 
-        return {
-          rawText: slideContent,
-          url: fileParser.publicUrl,
-        };
+        rawText = pptText
+          .replace(/\0/g, '') // remove null bytes
+          .replace(/\r\n/g, '\n')
+          .trim();
+
+        if (!rawText) {
+          throw new BadRequestException(
+            'No readable text found in PPTX slides',
+          );
+        }
+
+        const upload = await this.parseFileToSupabase(file, email);
+        publicUrl = upload.publicUrl;
       }
+
+      // === Unsupported extension ===
+      else {
+        throw new NotAcceptableException('Unsupported file extension');
+      }
+
+      // === Final validation ===
+      if (!rawText) {
+        throw new BadRequestException('File contains no extractable text');
+      }
+
+      return {
+        rawText,
+        url: publicUrl,
+      };
     } catch (error) {
-      this.logger.error(error);
-      throw new InternalServerErrorException('Pdf Parsing Failed');
+      this.logger.error('extractFileContent failed:', error);
+
+      // Let validation errors pass through
+      if (
+        error instanceof BadRequestException ||
+        error instanceof NotAcceptableException
+      ) {
+        throw error;
+      }
+
+      throw new InternalServerErrorException('File parsing failed');
     }
   }
 
-  async chunkText(text:string, maxContext = 10000) {}
+  async chunkText(
+    text: string,
+    options: {
+      maxTokens?: number;
+      overlapTokens?: number;
+      separator?: string;
+    } = {},
+  ) {
+    const {
+      maxTokens = 50000, // safe for Grok, Claude, GPT-4o, etc.
+      overlapTokens = 200, // prevents context loss
+      separator = '\n\n', // paragraph / slide break
+    } = options;
+
+    if (!text.trim()) return [];
+
+    // Rough token estimation: 1 token ≈ 4 chars (good enough for most languages)
+    const avgCharsPerToken = 4;
+    const maxChars = maxTokens * avgCharsPerToken;
+    const overlapChars = overlapTokens * avgCharsPerToken;
+
+    const chunks: string[] = [];
+    let start = 0;
+
+    while (start < text.length) {
+      const end = start + maxChars;
+
+      // If we're near the end, just take the rest
+      if (end >= text.length) {
+        chunks.push(text.slice(start).trim());
+        break;
+      }
+
+      // Try to cut at a natural breakpoint (paragraph, list, etc.)
+      let cutAt = text.lastIndexOf(separator, end);
+      if (cutAt <= start) cutAt = text.lastIndexOf('\n', end);
+      if (cutAt <= start) cutAt = text.lastIndexOf('. ', end);
+      if (cutAt <= start) cutAt = text.lastIndexOf(' ', end);
+
+      // Fallback: just cut at maxChars
+      const chunk = text.slice(start, cutAt > start ? cutAt + 1 : end).trim();
+      if (chunk) chunks.push(chunk);
+
+      // Move start forward, but keep overlap
+      start = cutAt > start ? cutAt + 1 : end;
+      start -= overlapChars;
+
+      // Safety: ensure we move forward
+      if (start >= text.length) {
+        break;
+      }
+      if (chunks.length > 1000) {
+        // Prevent infinite loop on weird text
+        this.logger.warn('Too many chunks, stopping early');
+        break;
+      }
+    }
+
+    const slimChunks = chunks.map((c) => c.trim()).filter((c) => c.length > 50);
+    return slimChunks;
+  }
+
+  async makeCallToChunkSummarizer(
+    chunks: string[],
+    numberOfQuestions = 50,
+    questionType = 'multiple_choice',
+  ): Promise<{ quiz: any; masterSummary: string }> {
+    if (chunks.length === 0) {
+      throw new BadRequestException('No content to summarize');
+    }
+
+    this.logger.log(`Processing ${chunks.length} chunks for quiz generation`);
+
+    const chunkSummaries: string[] = [];
+    const batchSize = 12; // OpenRouter is strict — 8 is safe
+
+    // Step 1: Summarize chunks in batches
+    for (let i = 0; i < chunks.length; i += batchSize) {
+      const batch = chunks.slice(i, i + batchSize);
+
+      const summaries = await Promise.all(
+        batch.map((chunk) => this.openRouterSummarizerApi(chunk)),
+      );
+
+      chunkSummaries.push(...summaries);
+
+      // Be gentle with OpenRouter
+      await new Promise((r) => setTimeout(r, 600));
+    }
+
+    // Step 2: Combine all summaries into one master summary
+    const masterSummary = await this.combineSummaries(chunkSummaries);
+
+    // Step 3: Generate final quiz ONCE
+    const quizJsonString = await this.generateQuizFromSummary(
+      masterSummary,
+      numberOfQuestions,
+      questionType,
+    );
+
+    let quiz;
+    try {
+      quiz = this.safeJsonParse(quizJsonString);
+    } catch (e) {
+      this.logger.error('Failed to parse quiz JSON', quizJsonString);
+      quiz = { raw: quizJsonString }; // fallback
+    }
+
+    return { quiz, masterSummary };
+  }
+
+  private safeJsonParse(str: string): any {
+    try {
+      // Step 1: Remove markdown fences
+      let jsonStr = str.trim();
+      const fenceRegex = /^```(?:json)?\s*([\s\S]*?)```$/;
+      const match = jsonStr.match(fenceRegex);
+      if (match) {
+        jsonStr = match[1];
+      }
+
+      // Step 2: Find the first [ and last ] — extract only the array
+      const start = jsonStr.indexOf('[');
+      const end = jsonStr.lastIndexOf(']');
+      if (start === -1 || end === -1 || end <= start) {
+        throw new Error('No JSON array found');
+      }
+
+      const arrayStr = jsonStr.substring(start, end + 1);
+
+      // Step 3: Final parse
+      return JSON.parse(arrayStr);
+    } catch (error) {
+      this.logger.error('JSON extraction failed', { original: str });
+      throw new BadRequestException(
+        'Failed to generate valid quiz - AI response was incomplete',
+      );
+    }
+  }
+
+  private async generateQuizFromSummary(
+    summary: string,
+    numberOfQuestions: number,
+    questionType: string,
+  ): Promise<string> {
+    return this.callLLMWithRetry({
+      messages: [
+        {
+          role: 'system',
+          content: `Generate exactly ${numberOfQuestions} high-quality ${questionType} questions.
+Format as JSON array:
+[
+  {
+    "question": "...",
+    "options": ["A", "B", "C", "D"],
+    "answer": "B",
+    "explanation": "..."
+  }
+]
+Rules:
+- Exactly one correct answer
+- Distractors must be plausible
+- Include detailed explanation
+- Cover different parts of the document`,
+        },
+        { role: 'user', content: summary },
+      ],
+      temperature: 0.4,
+    });
+  }
+
+  private async combineSummaries(summaries: string[]): Promise<string> {
+    const combined = summaries.join('\n\n---\n\n');
+    return this.callLLMWithRetry({
+      messages: [
+        {
+          role: 'system',
+          content:
+            'Combine these section summaries into one coherent, concise master summary (max 1500 words). Preserve all key concepts.',
+        },
+        { role: 'user', content: combined },
+      ],
+    });
+  }
+  private async openRouterSummarizerApi(chunk: string): Promise<string> {
+    return this.callLLMWithRetry({
+      messages: [
+        {
+          role: 'system',
+          content:
+            'Summarize this section into clear, examinable bullet points suitable for university-level quiz questions. Focus on definitions, facts, processes, and relationships.',
+        },
+        { role: 'user', content: chunk },
+      ],
+      temperature: 0.2,
+    });
+  }
+
+  private async callLLMWithRetry(params: any, attempt = 1): Promise<string> {
+    const apiKey = this.configService.get<string>('OPENROUTER_API_KEY');
+    const model = this.configService.get<string>('OPEN_ROUTER_MODEL');
+
+    try {
+      const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          // Optional: tell OpenRouter you're not a bot
+          'HTTP-Referer': 'https://www.hermexlabs.forxai.me',
+          'X-Title': 'Glauk Quiz Generator',
+        },
+        body: JSON.stringify({
+          model,
+          messages: params.messages,
+          temperature: params.temperature ?? 0.3,
+          max_tokens: 4096,
+        }),
+      });
+
+      if (!res.ok) {
+        const errorText = await res.text();
+        if (res.status === 429 && attempt <= 5) {
+          const delay = 3000 * attempt;
+          this.logger.warn(
+            `Rate limited (429), retry ${attempt}/5 in ${delay}ms`,
+          );
+          await new Promise((r) => setTimeout(r, delay));
+          return this.callLLMWithRetry(params, attempt + 1);
+        }
+        throw new Error(`OpenRouter error ${res.status}: ${errorText}`);
+      }
+
+      const data = await res.json();
+      return data.choices[0].message.content.trim(); // ← return string!
+    } catch (error) {
+      this.logger.error('LLM call failed', error);
+      throw new InternalServerErrorException(
+        'AI service temporarily unavailable',
+      );
+    }
+  }
 }

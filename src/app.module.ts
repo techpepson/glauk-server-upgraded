@@ -1,3 +1,4 @@
+import { ConsumerModule } from './consumers/consumer.module';
 import { AuthModule } from './auth/auth.module';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { QuizModule } from './quiz/quiz.module';
@@ -23,26 +24,26 @@ import { BullModule } from '@nestjs/bullmq';
 
 @Module({
   imports: [
+    ConsumerModule,
     BullModule.forRootAsync({
       imports: [ConfigModule],
       useFactory: async (config: ConfigService) => ({
         connection: {
-          host: config.get<string>('redis.host'),
-          port: config.get<number>('redis.port'),
-          password: config.get<string>('redis.password'),
+          host: config.get<string>('REDIS_HOST'),
+          port: config.get<number>('REDIS_PORT'),
+          password: config.get<string>('REDIS_PASSWORD'),
+        },
+        defaultJobOptions: {
+          removeOnComplete: 50,
+          removeOnFail: 50,
         },
       }),
       inject: [ConfigService],
     }),
 
-    BullModule.registerQueue(
-      {
-        name: 'quiz-processing',
-      },
-      {
-        name: 'generate-quiz',
-      },
-    ),
+    BullModule.registerQueue({
+      name: 'quiz-processing', // ← THIS IS THE EXACT NAME
+    }),
 
     MailerModule.forRoot({
       transport: {
@@ -71,6 +72,7 @@ import { BullModule } from '@nestjs/bullmq';
     QuizModule,
     HelpersModule,
     CoursesModule,
+    ConsumerModule,
   ],
   controllers: [CoursesController, AppController],
   providers: [

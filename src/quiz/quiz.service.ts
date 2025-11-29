@@ -29,44 +29,89 @@ export class QuizService {
   ) {
     try {
       const user = (await this.helpers.userExist(email)).user;
+      if (!user) throw new NotFoundException('User does not exist');
 
-      //check if user exists in the db
-      if (!user) {
-        throw new NotFoundException('User does not exist');
-      }
-
-      //required points for users
-      const requiredCredits = payload.numberOfQuestions / 10;
-
+      const requiredCredits = Math.ceil(payload.numberOfQuestions / 10);
       const hasEnoughCredits = await this.helpers.checkUserCredit(
         email,
         requiredCredits,
       );
-
       if (!hasEnoughCredits) {
-        throw new PreconditionFailedException(
-          'Not enough credits to process pdf',
-        );
+        throw new PreconditionFailedException('Not enough credits');
       }
 
-      if (file.buffer === null) {
-        throw new BadRequestException('The uploaded media is not valid.');
+      if (!file?.buffer || file.buffer.length === 0) {
+        throw new BadRequestException('Invalid file');
       }
 
-      //if the user exists, add the user process to the queue
+      // STEP 1: Extract text
+      const extracted = await this.helpers.extractFileContent(file, email);
+
+      // STEP 2: FORCE rawText to be a clean string
+      let extractedText: string;
+
+      if (typeof extracted.rawText === 'string') {
+        extractedText = extracted.rawText;
+      } else if (Buffer.isBuffer(extracted.rawText)) {
+        extractedText = extracted.rawText;
+      } else if (extracted.rawText && typeof extracted.rawText === 'object') {
+        extractedText = JSON.stringify(extracted.rawText);
+      } else {
+        extractedText = String(extracted.rawText ?? '');
+      }
+
+      // Remove null bytes and trim
+      extractedText = extractedText.replace(/\0/g, '').trim();
+
+      if (extractedText.length === 0) {
+        throw new BadRequestException('No readable text found in the file');
+      }
+
+      const chunks = await this.helpers.chunkText(extractedText);
+      // STEP 3: Add to queue — now 100% safe
       const job = await this.quizProcessingQueue.add('process-quiz', {
-        payload,
         email,
-        file,
+        chunks, // ← guaranteed array of text chunks
+        url: extracted.url,
+        numberOfQuestions: payload.numberOfQuestions,
+        questionType: payload.questionType || 'multiple_choice',
       });
 
       return {
-        id: job.id,
-        process: job.progress,
-        token: job.token,
+        jobId: job.id,
+        status: 'queued',
+        message: 'Quiz generation started in background',
+        sourceUrl: extracted.url,
       };
     } catch (error) {
-      this.logger.log(error);
+      this.logger.error('Failed to queue quiz', error);
+      throw error;
+    }
+  }
+  async getJobStatus(jobId: string, email: string) {
+    try {
+      const userExists = await this.helpers.userExist(email);
+      if (!userExists) {
+        throw new NotFoundException('User not found');
+      }
+      const job = await this.quizProcessingQueue.getJob(jobId);
+      if (!job) {
+        throw new NotFoundException('Job not found');
+      }
+
+      const state = await job.getState();
+      const progress = job.progress;
+      const result = job.returnvalue;
+
+      return {
+        jobId: job.id,
+        state,
+        progress,
+        result,
+      };
+    } catch (error) {
+      this.logger.error('Failed to get job status', error);
+      throw error;
     }
   }
 

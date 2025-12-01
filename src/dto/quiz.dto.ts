@@ -17,10 +17,6 @@ export class QuizDto {
   @IsNotEmpty()
   difficultyLevel: QuizDifficulty;
 
-  @IsString()
-  @IsNotEmpty()
-  course: string;
-
   @IsEnum(QuestionType)
   @IsNotEmpty()
   questionType: QuestionType;

@@ -26,6 +26,7 @@ export class QuizService {
     payload: QuizDto,
     email: string,
     file: Express.Multer.File,
+    courseId: string,
   ) {
     try {
       const user = (await this.helpers.userExist(email)).user;
@@ -75,6 +76,10 @@ export class QuizService {
         url: extracted.url,
         numberOfQuestions: payload.numberOfQuestions,
         questionType: payload.questionType || 'multiple_choice',
+        difficultyLevel: payload.difficultyLevel || 'medium',
+        courseId,
+        additionalNotes: payload.additionalNotes || '',
+        courseArea: payload.courseArea,
       });
 
       return {
@@ -215,7 +220,7 @@ export class QuizService {
           id: questionId,
         },
         data: {
-          correctAnswers: payload.correctAnswers,
+          correctAnswer: '',
           remarks: payload.remarks,
           obtainedGrade: payload.grade,
           obtainedGPT: payload.gradePoint,

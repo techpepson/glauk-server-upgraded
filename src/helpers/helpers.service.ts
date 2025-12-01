@@ -9,10 +9,10 @@ import { PrismaService } from '../prisma/prisma.service';
 import ShortUniqueId from 'short-unique-id';
 import { supabase } from '../supabase/supabase-client';
 import { PDFParse } from 'pdf-parse';
-import PptxParser from 'node-pptx-parser';
 import { parseOfficeAsync } from 'officeparser';
 
 import { ConfigService } from '@nestjs/config';
+import { QuizDifficulty } from '../enum/enum';
 
 @Injectable()
 export class HelpersService {
@@ -324,6 +324,8 @@ export class HelpersService {
     chunks: string[],
     numberOfQuestions = 50,
     questionType = 'multiple_choice',
+    difficultyLevel: QuizDifficulty,
+    additionalNotes?: string,
   ): Promise<{ quiz: any; masterSummary: string }> {
     if (chunks.length === 0) {
       throw new BadRequestException('No content to summarize');
@@ -356,12 +358,15 @@ export class HelpersService {
       masterSummary,
       numberOfQuestions,
       questionType,
+      difficultyLevel,
+      additionalNotes,
     );
 
     let quiz;
     try {
-      quiz = this.safeJsonParse(quizJsonString);
+      quiz = JSON.parse(quizJsonString);
     } catch (e) {
+      this.logger.log(e.message);
       this.logger.error('Failed to parse quiz JSON', quizJsonString);
       quiz = { raw: quizJsonString }; // fallback
     }
@@ -369,50 +374,23 @@ export class HelpersService {
     return { quiz, masterSummary };
   }
 
-  private safeJsonParse(str: string): any {
-    try {
-      // Step 1: Remove markdown fences
-      let jsonStr = str.trim();
-      const fenceRegex = /^```(?:json)?\s*([\s\S]*?)```$/;
-      const match = jsonStr.match(fenceRegex);
-      if (match) {
-        jsonStr = match[1];
-      }
-
-      // Step 2: Find the first [ and last ] — extract only the array
-      const start = jsonStr.indexOf('[');
-      const end = jsonStr.lastIndexOf(']');
-      if (start === -1 || end === -1 || end <= start) {
-        throw new Error('No JSON array found');
-      }
-
-      const arrayStr = jsonStr.substring(start, end + 1);
-
-      // Step 3: Final parse
-      return JSON.parse(arrayStr);
-    } catch (error) {
-      this.logger.error('JSON extraction failed', { original: str });
-      throw new BadRequestException(
-        'Failed to generate valid quiz - AI response was incomplete',
-      );
-    }
-  }
-
   private async generateQuizFromSummary(
     summary: string,
     numberOfQuestions: number,
     questionType: string,
+    difficultyLevel: QuizDifficulty,
+    additionalNotes?: string,
   ): Promise<string> {
     return this.callLLMWithRetry({
       messages: [
         {
           role: 'system',
-          content: `Generate exactly ${numberOfQuestions} high-quality ${questionType} questions.
+          content: `Generate exactly ${numberOfQuestions} high-quality ${questionType} questions with a difficulty of ${difficultyLevel}. In the case where the user adds an ${additionalNotes}, add that as part of their request,in a refined manner. If the ${additionalNotes} does not make sense and not improve upon the quality of the question, or is not associated with the content uploaded, ignore it. 
 Format as JSON array:
 [
   {
     "question": "...",
-    "options": ["A", "B", "C", "D"],
+    "options": ["A. ", "B. ", "C. ", "D. "],
     "answer": "B",
     "explanation": "..."
   }
@@ -474,7 +452,7 @@ Rules:
           model,
           messages: params.messages,
           temperature: params.temperature ?? 0.3,
-          max_tokens: 4096,
+          max_tokens: 15000,
         }),
       });
 

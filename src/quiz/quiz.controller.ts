@@ -26,12 +26,14 @@ export class QuizController {
     @UploadedFile() pdf: Express.Multer.File,
     @Body() payload: QuizDto,
     @Req() req: Request,
+    @Query('courseId') courseId: string,
   ) {
     const user = (req.user as any).email;
     const job = await this.quizService.addQuizProcessToQueue(
       payload,
       user,
       pdf,
+      courseId,
     );
 
     return job;

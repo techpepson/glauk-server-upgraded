@@ -78,9 +78,12 @@ model CourseSlides {
 
 model Question {
   id                         String       @id @default(cuid())
-  content                    Json?
-  correctAnswers             Int
+  question                   String
+  options                    String[]
+  correctAnswer              String
+  answerId                   String
   remarks                    String?
+  reasonForAnswer            String?
   difficultyLevel            String       @default("medium")
   questionType               String       @default("multiple_choice")
   numberOfQuestionsGenerated Int
